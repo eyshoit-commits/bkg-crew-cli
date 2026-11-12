@@ -1,259 +1,300 @@
-# Architektur- und Implementierungsplan: Integrierte Lanes, Agent-Gateway, Crew-Memory und Context-Orchestrierung
+# Zielarchitektur: bkgcrewcli als lokale Agenten- und Provider-Plattform
 
 **Ziel-Repository:** `eyshoit-commits/bkg-crew-cli`  
-**Basis:** aktueller `main`-Stand; bei jeder Implementierung HEAD und Worktree erneut prüfen.  
-**Status:** Designvorschlag. Die Gateway-/Lane-Basis ist laut aktuellem Repository-Dokument bereits in `bkgcrewcli` integriert; Memory, projektübergreifende Code-Suche und recoverable Context-Kompression sind die wesentlichen Erweiterungen.  
-**Architekturvorgabe:** Laufzeitfunktionen bleiben in `bkgcrewcli`. Kein verpflichtender externer Proxy, Memory-Dienst, Python-Sidecar oder anderer separater Prozess. Optionale Protokolladapter dürfen unabhängig entwickelt werden, sind aber nicht Voraussetzung für den lokalen Kern.
+**Basis:** `main`; vor jeder Implementierung den echten HEAD, Module und Tests neu verifizieren.  
+**Status:** Architektur- und Implementierungsplan; keine Runtime-Implementierung in diesem Dokument.  
+**Eigenentwicklung:** Die genannten Repositories sind ausschließlich Ideengeber. Es wird kein Quellcode kopiert, kein Referenzprojekt als verpflichtende Runtime-Abhängigkeit eingebunden und keine Zusammenarbeit behauptet. Wir schreiben und testen die Implementierung selbst.
 
-## 1. Ziel und Leitentscheidung
+## 1. Vision und Prioritäten
 
-Die Referenzprojekte werden nicht als unbesehenes Paketbündel oder als verpflichtende Runtime-Abhängigkeiten eingebaut. Stattdessen übernehmen wir ihre jeweils stärksten, nicht überlappenden Ideen hinter eigenen Rust-Schnittstellen:
+bkgcrewcli soll Agenten, Providerzugriff, Crew-Workflows und Projektwissen in einer überprüfbaren lokalen Plattform vereinen. Es soll nicht einfach möglichst viele Features anhäufen: Jede Funktion braucht eine klare Zuständigkeit, Berechtigungsgrenze, Messbarkeit und Ausfallstrategie.
 
-- **Shodh-Memory** ist die Hauptvorlage für lokale, LLM-freie Memory-Lebenszyklen: gestufte Erinnerung, deduplizierte Erfassung, Zugriffssignale, Konsolidierung und nachvollziehbare Pflege.
-- **Uteke** ergänzt explizite Rooms mit Autor-/Quellen-Provenienz, Hybrid-Retrieval, zeitbezogene Abfragen und Beziehungen zwischen Erinnerungen.
-- **srag** inspiriert den projektübergreifenden Code-Index: AST-bewusste Chunks, inkrementelles Indexieren, Hybrid-Suche, Pattern-Erkennung und Caller/Callee-Kontext. Anders als srag soll der erste Zielpfad ohne Python-ML-Sidecar funktionieren.
-- **TinyJuice** liefert das Konzept für inhaltsbewusste, policy-gesteuerte Tool-Output-Reduktion mit expliziter Wiederherstellung des Originals statt stiller Trunkierung.
-- **agent-cli-to-api** dient als Vorlage für einen klaren Adaptervertrag zwischen heterogenen Agent-CLIs und OpenAI-/Anthropic-kompatiblen Clientoberflächen. Das vorhandene native Gateway bleibt die Implementierungsbasis.
-- **prmt** inspiriert allenfalls die schnelle, kontextabhängige Terminal-Statusanzeige. Es ist kein Memory-, Routing- oder Agenten-Orchestrierungsbaustein.
+Priorität und Abhängigkeiten:
 
-Zusammen ergibt sich eine Pipeline: **Agenten-Tools und Projektdateien → sichere, abrufbare Tool-Outputs → Code-/Memory-Retrieval → begrenzter Context Builder → Agenten-Task → überprüfbare Ergebnisse und Memory-Vorschläge**. Provider-Routing, Modell-Governor, Telemetrie und Wiederherstellung hängen an derselben Task-/Session-Identität, bleiben aber getrennte Module.
+1. **Nim-proxy-inspirierte Provider-Lanes und Admission-Control** als zuverlässige Unterlage für alle verwalteten Provider-Sends.
+2. **Copilot-API-inspirierte, multi-protokollfähige Gateway-Verträge**: mehrere Client-Protokolle, Provider-/Modellrouting, Capabilities, Streaming und Diagnose – innerhalb der bereits vorhandenen Rust-Gateway-Basis.
+3. **Crew-/Task-Orchestrierung** auf den vorhandenen Agenten-, Prozess- und Queue-Funktionen aufbauen.
+4. **Shodh-/Uteke-inspiriertes, lokales und belegbares Projekt-/Crew-Memory** plus deterministischer Context Builder.
+5. **srag-inspirierte Code-Suche** und **TinyJuice-inspirierte, wiederherstellbare Tool-Output-Reduktion**, nachdem Scope, Storage und Recovery definiert sind.
+6. **Prmt-inspirierte Terminal-UX** nur, falls sie messbar nützlich ist; kein Kernsystem und keine notwendige Abhängigkeit.
 
-## 2. Bestehende Basis und Grenzen
+Alles ist selbst zu implementieren. „Feature übernehmen“ bedeutet hier, gewünschtes Verhalten zu spezifizieren, nicht Code, interne Endpunkte oder nicht dokumentierte Authentifizierungsverfahren nachzubauen.
 
-Das Repository besitzt bereits Rust-Agentenadapter, Prozesssteuerung/Cancellation, Konfiguration, Keystore, normalisierte Provider-Requests und Events sowie einen integrierten Gateway. Die aktuelle Architekturdokumentation beschreibt unter anderem OpenAI-kompatible Chat-/Responses-Routen, Anthropic Messages, scoped Routen, Tokens, Streaming, Usage und Admin-Funktionen. Diese existierenden Verträge sind zuerst am tatsächlichen HEAD zu prüfen und weiterzuverwenden; der Plan setzt nicht voraus, dass alle Adapter dieselben Fähigkeiten haben.
+## 2. Tatsächlicher Ziel-Repository-Kontext
 
-Der Gateway-/Lane-Pfad bleibt der einzige gepoolte Provider-Sendepfad. Ein Agentenadapter gilt nur dann als gepoolt, wenn Tests nachweisen, dass Base-URL, Authentifizierung, Modellzuordnung und Stream tatsächlich über den lokalen Gateway laufen. Bei nicht kompatiblen Agenten muss Diagnose den ungepoolten Modus klar ausweisen; kein stiller Direct-Fallback.
+Das Ziel ist `eyshoit-commits/bkg-crew-cli`, nicht `bkg-zig/bkg-crew-cli`. Das README des Ziels beschreibt ein Rust-CLI mit Agent-Subprozessen (Claude Code, Codex, OpenCode, Cursor), einheitlichem NDJSON-Eventstream, Model Registry und Projektkonfiguration. Die Architektur-Referenz im Ziel beschreibt außerdem einen integrierten `serve`-Gateway mit Chat Completions, Responses und Anthropic Messages, Provider-scoped Routen, Tokens, Streaming/Usage sowie einer vorhandenen WebUI.
 
-## 3. Zielarchitektur
+Vor Implementierung muss der aktuelle Ziel-HEAD mit den tatsächlichen Dateien verglichen werden. Insbesondere nicht annehmen, dass `src/crew`, `src/cognition`, `src/vault`, `src/mender`, `src/task_queue` oder andere Module aus dem Upstream-Repository im Ziel vorhanden sind. Bestehende Dateien/Module nur nutzen, wenn sie im Ziel-HEAD tatsächlich existieren; andernfalls als neue Integrationspunkte planen.
+
+## 3. Architekturübersicht
 
 ```text
 CLI / Public Rust API / vorhandene WebUI
         │
-        ├── Task- und Crew-Orchestrierung (IDs, DAG, Deadline, Cancellation)
-        ├── Context Builder
-        │     ├── Memory: Working / Session / Long-term, Rooms, Provenienz
-        │     ├── Code Index: AST-Chunks, FTS, optional lokaler Vektorindex
-        │     └── Tool-output policy + abrufbarer Original-Cache
-        ├── Agent adapters / capability matrix
-        ├── Provider admission: bounded FIFO + Modell-Governor + Key-Lanes
-        └── integrierter Loopback-Gateway / direkter ApiClient
-                └── erlaubte Provider- oder Agent-CLI-Backends
+        ├── Task- und Crew-Orchestrierung
+        │     └── DAG, durable state, retry policy, deadline, cancellation
+        ├── Context Orchestrator (Budget + provenance)
+        │     ├── Memory store: project / room / task scopes
+        │     ├── Code index: symbols / FTS / optional local vectors
+        │     └── Artifact store: tool output + explicit recovery handles
+        ├── Agent adapters + verified capability matrix
+        ├── Provider Gateway: Chat / Responses / Messages adapters
+        └── Shared Provider Admission API
+              ├── bounded FIFO dispatcher
+              ├── per-key sliding-window lanes and cooldowns
+              ├── model/account concurrency governor
+              └── provider transports (HTTP / supported WebSocket)
 ```
 
-Jede Komponente erhält explizite Grenzen und Versionen. Memory-Store, Code-Index, CCR-ähnlicher Output-Cache und Session-Logs sind unterschiedliche Datenklassen mit getrennten Aufbewahrungs-, Lösch- und Datenschutzregeln. Ein Retrieval- oder Recovery-Token ist ein opaker, autorisierungsgebundener Verweis, kein öffentliches Geheimnis und kein Ersatz für Scope-Prüfung.
+Provider routing, Agent-CLI compatibility, task scheduling, memory, code indexing und Artefaktkompression sind getrennte Komponenten, aber werden mit stabilen IDs und Events integriert. Alle Persistenzen sind lokal und haben unterschiedliche Retention-, Verschlüsselungs-, Backup- und Löschregeln.
 
-## 4. Integrierter Gateway und Provider-Lanes
+## 4. Fundament: nim-proxy-inspirierte Lane- und Admission-Schicht
 
-Bestehende Gateway-Funktionalität wird nicht neu erfunden. Die Erweiterungen sollen sicherstellen, dass direkte API-Aufrufe und kompatible Agenten-CLI-Aufrufe dieselbe Admission-API und denselben Pool verwenden.
+Die zentrale Lane-Logik kommt zuerst: weder Agenten noch Gateway-Routen dürfen Rate-Limits, Concurrency-Regeln oder Warteschlangen umgehen. Der Zielprozess kann vorhandene Gateway-/Provider-Module wiederverwenden, falls sie im aktuellen HEAD existieren; der Lane-Mechanismus wird als eigene Rust-Implementierung spezifiziert.
 
 ### 4.1 Provider-Pool und Lane
 
-Poolidentität mindestens: `provider_id + normalized_base_url + model_id + rate_limit_scope`. Eine Lane enthält Keystore-Referenz, Rate-Limit, Rolling-Window-Zeitstempel, Cooldown und nicht geheime Health-/Fehlerklassifikation. Secrets erscheinen nie in Config-Ausgaben, Logs, Debug oder Metriklabels. Legacy-Provider mit einem einzelnen Key werden rückwärtskompatibel als Ein-Lane-Pool behandelt.
+Pool-Schlüssel: `provider_id + normalized_endpoint + model_or_shared_scope + rate_limit_scope`. Jede Lane verweist nur über eine geheime Keystore-ID auf Credentials und hält `rpm_limit`, aktiv/inaktiv, Sliding-Window-Sendezustand, Cooldown und nicht geheime Health-/Fehlerklasse.
 
-### 4.2 Admission, Fairness und Governor
+- Bestehende einzelne Provider-Keys bleiben als Pool mit einer Lane kompatibel.
+- Keys werden nur dann über einen Pool addiert, wenn ihre realen Upstream-Limits dies erlauben. Keine Durchsatz- oder ToS-Umgehung versprechen.
+- API-Key-Text darf nicht in Logs, Metrikenlabels, `Debug`, Dry-Run oder Config-Ausgaben erscheinen.
 
-- Sliding Window exakt nach konfiguriertem Providerlimit; atomare Reservation vor dem Send.
-- Abgebrochene Requests vor dem Senden geben die Reservation frei; gesendete Requests, Retries und Hedges zählen.
-- 429/`Retry-After` wirkt auf die sendende Lane; klar klassifizierte modellweite Worker-Exhaustion auf den Modell-Governor.
-- Begrenzte globale FIFO-Queue, Queue-Full-Fehler, Deadline, Cancellation und modellweite Concurrency-Permits.
-- Lane-Auswahl: sofort verfügbare Conversation-Affinity, andernfalls normalisierte Auslastung und fairer Round-Robin-Tie-Break, dann Spillover. Kein unbegrenztes Warten auf Sticky-/Cache-Affinity.
-- Adaptive Limits und Same-Model-Hedging bleiben spätere, standardmäßig deaktivierte Optimierungen und müssen über das Rate-/Concurrency-Budget laufen.
+### 4.2 Limiter, Queue und Auswahl
 
-### 4.3 Gateway-Adaptervertrag
+- Sliding Window passend zum echten Providerlimit; kein burstfähiger Token-Bucket, wenn der Upstream Rolling RPM durchsetzt.
+- Reservationen sind atomar. Vor-Send-Abbruch erstattet ungesendete Slots; gesendete Requests, Retries und Hedges zählen.
+- Begrenzte zentrale FIFO-Warteschlange mit Queue-Full, Taskdeadline, Cancellation und konfiguriertem Max-Wait.
+- Lane-Auswahl: sofort nutzbare Conversation-Affinity, sonst normalisierte Auslastung (`in_window / rpm_limit`) mit round-robin-Tie-Break, dann Spillover. Affinity darf nicht unbegrenzt blockieren.
+- 429/`Retry-After` kühlt die betroffene Lane ab. Modellweite Worker-Exhaustion regelt nur den Modell-Governor, nicht pauschal alle Lanes.
+- Request braucht RPM-Reservation und Modell-Concurrency-Permit; RAII-/Drop-Guards geben Permits auf jedem Ende frei.
+- Konversations-affine Lane kann Provider-Prefix-Caching begünstigen, garantiert aber weder Cache-Hit noch Tokenrabatt.
+- Retries sind begrenzt, klassifiziert und deadline-aware. Hedging bleibt standardmäßig deaktiviert und muss dasselbe Modell, Semantik und dieselben Budgetregeln nutzen.
 
-Capability je Agent/Backend explizit erfassen und testen: API-Base-URL, Auth-Format, unterstützte API-Oberfläche (Chat Completions, Responses, Messages), Modellabbildung, Tool-/Multimodal-Verhalten, Streaming/SSE und Credentials-Fallback. `agent-cli-to-api` zeigt den Nutzen eines einheitlichen Clientvertrags über mehrere CLIs und API-Formate. Für bkgcrewcli heißt das: vorhandenes Gateway gezielt um benötigte Adapter erweitern, nicht pauschal jede CLI als HTTP-Backend starten.
+### 4.3 Neustart und Mehrprozessbetrieb
 
-Gateway bleibt taskgebunden, Loopback-only, token-authentifiziert, modell-/requestbeschränkt und fail-closed. Tokens kurzlebig, zufällig, redigiert und beim Taskende widerrufen. Kein beliebiger URL-Proxy. Offizielle, autorisierte CLI-Login- oder Provider-API-Wege nutzen; keine Umgehung von Anbieterzugriffskontrollen oder stilles Wiederverwenden nicht dafür vorgesehener Zugangsdaten.
+In-memory Ratezustand allein ist nach Restart keine sichere Grundlage. Für aktivierte Pools ist persistierter Zustand oder ein konservativer Drain-/Window-Wait erforderlich. Mehrere aktive Prozesse dürfen dieselben Keys nicht ohne gemeinsamen atomaren Limiter und Fencing ausgeben. Der erste sichere Betrieb sollte genau einen Pool-Eigentümer je Key-Set erzwingen oder klar dokumentieren.
 
-## 5. Memory: Shodh + Uteke als Hauptkombination
+### 4.4 Streaming-Verhalten
 
-### 5.1 Eigenes Datenmodell und Scope
+SSE-Parser und -Writer müssen fragmentierte Events, Keepalive, EOF, Downstream-Disconnect, Cancellation, Usage-Endevents und Deadline behandeln. Ein Streaming-Request darf dem Client nur dann Erfolg signalisieren, wenn das gewählte Protokoll spätere Fehler zuverlässig als terminales Event ausdrücken kann. Heartbeats sind keine Verlängerung der absoluten Deadline.
+
+## 5. Copilot API: Feature-Abdeckungsprüfung und sinnvolle Kombination
+
+Die öffentliche `caozhiyuan/copilot-api`-README beschreibt einen lokalen Universal-Gateway für OpenAI Chat Completions, Responses und Anthropic Messages, mehrere eingebaute und Drittanbieter-Provider, Agenten-Setups, SSE/WebSocket, Tool-/Modellkompatibilität, Model Discovery/Mappings, Auth-/Konfiguration, Usage Monitoring und eine Electron-Desktop-App. Die Liste unten macht transparent, was der Zielplan übernimmt, was durch vorhandene Ziel-Funktionalität bereits adressiert ist und was bewusst nicht in den Kern wandert. Das ist eine Architekturabdeckung, kein Claim gleicher Implementierung oder vollständiger Feature-Parität.
+
+| Copilot-API-Idee | Plan im bkgcrewcli-Ziel | Entscheidung / zusätzlicher Nachweis |
+|---|---|---|
+| Ein Gateway für Chat Completions, Responses und Messages | **Beibehalten und härten**; bestehende Gateway-Routen des Zielrepos prüfen, Protokolle als typisierte Adapter | Contract- und Round-trip-Tests je Endpoint, Client und Upstream; keine pauschale Übersetzung aller Felder behaupten |
+| Mehrere Provider und Providerwahl | **Erweitern** über Registry, explizite Provider-Profile und Modelle; jeden Send über gemeinsame Lane-/Admission-API routen | Feature-Support matrix je Provider, Endpoint und Modell; unbekannte Kombination klar ablehnen |
+| Agent-CLI-fertige Konfiguration | **Beibehalten/erweitern** über AgentCapabilities und geprüfte Config-Templates | Pro Agent testen: Base URL, Auth, Modell, tool calls, stream und kein unerwarteter Credential-Fallback |
+| Chat/Responses/Messages Übersetzung | **Selektiv implementieren** als explizite Adapter, keine lossy magic translation | Schema-Kompatibilität versionieren; nicht unterstützte Tools/Modalitäten in Capability-Antworten ausweisen |
+| SSE über mehrere Protokolle | **Übernehmen** mit Parser-Fixtures, Heartbeats und Cancellation | Chunk-Fragmentierung, Disconnect, Last-Event/Usage und Fehlerfälle testen |
+| WebSocket-Upstream für Responses | **Optionaler späterer Transport** hinter demselben Admission-/Usage-Vertrag | Nur wenn Zielprovider es dokumentiert unterstützen und HTTP/SSE Tests/Benchmarks belegen Nutzen |
+| Modellkatalog, Discovery, Aliases, Mapping | **Erweitern** aus bestehender Model Registry/scoped routes | Cache, TTL, single-flight Refresh, stabile IDs; Discovery darf keine Rate-Limit-Sends verbrauchen, wenn Provider dies ermöglicht |
+| Tool-Use, tool_choice, Tool-Search/MCP bridge | **Teilweise, explizit**: standardisierte Tool-Calls und optionale deferred-tool-Schnittstelle | JSON-Schema, tool_choice, Round-trip IDs und Tool-Ergebnisgrenzen testen; nichts stillschweigend entfernen |
+| Multimodalität (Bilder/Dateien) | **Capability-gesteuert** | Payload-Limits, MIME-/Format-Validierung, Redaction/Logs; keine Inhalte in Diagnose kopieren |
+| OAuth-/Provider-Credentials | **Nur autorisierte, dokumentierte Wege** über bestehende Keystore/Auth-Adapter | Keine nicht dokumentierte Credential-Extraktion, privaten Endpunkte oder Zugriffskontrollumgehung; Providerzugang ist je Anbieter zu prüfen |
+| Usage, Token/Kosten-/Quota-Ansichten | **Übernehmen**, an bestehende Usage/WebUI anschließen | exakte Providerusage von Schätzwerten trennen; Modellpreise/Quoten mit Quelle und Zeitstempel versionieren |
+| Logs, Diagnose, Konfiguration | **Übernehmen** mit redigierten Request-Metadaten, Doctor und Konfigurationsvalidierung | Keine Requestinhalte in standardmäßigen Logs; Secrets immer redigieren |
+| Desktop Electron App | **Nicht in den Rust-Kern übernehmen** | Vorhandene WebUI/CLI ist bereits die passende Oberfläche; zusätzliche Desktop-Runtime wäre Overhead und doppelte Konfigurationsquelle |
+| Node/Bun-Paket-/Installationsmodell | **Nicht übernehmen** | Ziel ist native Rust-CLI/Server, keine parallele Runtime |
+| Provider-spezifische Subscription-/OAuth-Tricks | **Nicht als allgemeine Gateway-Funktion** | Nur öffentlich unterstützte und autorisierte Providerintegration. Keine Reverse-Engineering- oder ToS-Umgehungsziele |
+
+**Ergebnis der Abdeckung:** Die aktuell geprüfte Architektur-Referenz des Ziels deckt bereits Chat Completions, Responses, Messages, scoped routing, Tokens, Streaming, Usage und WebUI ab. Sie belegt aber nicht allein die volle Copilot-API-Abdeckung von Multi-Provider-Capabilities, durchgängigen Tool-/Multimodal-Roundtrips, modellbezogener Transportwahl, robustem Discovery/Mapping, getrenntem Quota-/Usage-Modell oder Desktop-App-Funktionen. Die obige Tabelle markiert diese als neue/zu verifizierende Arbeit oder bewusste Nicht-Ziele. **Wir sollten nicht behaupten, Copilot-API sei vollständig absorbiert, bis die Feature-Matrix pro Protokoll/Provider mit Tests ausgefüllt ist.**
+
+## 6. Agent-Adapter und Kompatibilitätsmatrix
+
+Jeder Agent und Provider bekommt explizite Capabilities, z. B.:
+
+```text
+protocols: chat | responses | messages
+streaming: sse | websocket | none
+features: tool_calls, tool_choice, json_mode, images, files, usage
+routing: configurable_base_url, auth_scheme, model_mapping
+limits: request_bytes, context_tokens, max_output_tokens
+fallback: none | explicitly_unmanaged
+```
+
+Diese Angaben sind nicht bloß Konfiguration; CI muss sie durch contract tests verifizieren. Ein Adapter darf niemals als „durch Lanes gepoolt“ ausgewiesen werden, wenn er tatsächlich intern eigene direkte Provider-Credentials verwendet. Nicht unterstützte Felder werden strukturiert zurückgemeldet statt still verworfen.
+
+## 7. Crew-Task-Orchestrierung
+
+Auf den tatsächlich existierenden Task-/Crew-Modulen aufbauen. Workflow ist ein dauerhafter DAG aus typed tasks mit `workflow_id`, `task_id`, Abhängigkeiten, Agent/Provider-Zuweisung, Deadline, Retry-Policy, Cancellation-Token, Workspace-Sandbox und Result-Ref.
+
+- Ergebnisse zwischen Aufgaben als begrenzte Dependency-Summaries und Artefakt-IDs übergeben, nicht gesamte Transkripte.
+- Taskzustände und Event-IDs crash-konsistent persistieren; nach Restart eindeutige Fortsetzung oder explizit `interrupted` melden.
+- Tasks können unterschiedliche Agents/Modelle nutzen, aber Modellwahl und Fallback sind explizite Workflow-Policy, nicht stille Substitution.
+- Side effects (Dateiänderungen, Commands, Commits) bleiben über Sandbox-/Permission-Policy und menschliche Freigaben steuerbar.
+- Idempotency keys für wiederholte Workflow-Submission und Tool-/Memory-Capture verwenden.
+
+## 8. Memory-Kern: Shodh + Uteke
+
+### 8.1 Datenmodell und Scope
 
 ```text
 project_id, room_id, workflow_id, task_id, session_id
 agent_id, author_kind (human|agent|system), source_ref
-memory_id, memory_type, tier, content_hash, version, status
-created_at, updated_at, valid_from, valid_until, confidence, importance
+memory_id, type, tier, content_hash, version, status
+created_at, valid_from, valid_until, confidence, importance
 privacy_class, tags/entities, accessed_at, access_count
-relations (supports|contradicts|supersedes|references|co_retrieved)
+relations: supports | contradicts | supersedes | references | co_retrieved
 ```
 
-Scopes sind Autorisierungsgrenzen, nicht bloß Suchfilter. Ein Projekt- oder Room-Recall muss vor der Suche auf erlaubte IDs eingeschränkt werden. Es gibt keine automatische Hochstufung von Projektwissen in globale User-Memory. Room-Zugriff sowie Import/Export und Löschung werden explizit auditiert.
+Projekt- und Room-Scope sind echte Berechtigungsgrenzen; erlaubte IDs müssen vor Recall gefiltert werden. Projektwissen wird nicht automatisch in globale User-Memory hochgestuft. Writes sind versioniert/optimistisch (`expected_version`). Autoren-/Quellen-Provenienz bleibt erhalten. Dedupe ist idempotent nach Scope, normalisiertem Inhalt und Quelle.
 
-### 5.2 Tiers und Lern-/Konsolidierungsregeln
+### 8.2 Tiers und Lernregeln
 
-- **Working:** flüchtiger Taskkontext und kompakte offene Ziele.
-- **Session/Episodic:** Taskverlauf, Entscheidungen, Tests, Fehler und Übergaben mit Quellenreferenzen.
-- **Long-term/Semantic:** geprüfte Fakten, Constraints, Entscheidungen und wiederverwendbare Muster/Prozeduren.
+- **Working:** flüchtige Taskziele, aktueller Fortschritt, offene Fragen.
+- **Session/Episodic:** Taskergebnisse, Test-/Fehlerbeobachtungen, Übergaben und Quellen.
+- **Long-term/Semantic/Procedural:** geprüfte Fakten, Constraints, Entscheidungen, Muster und Prozeduren.
 
-Shodh-inspirierte Zugriffssignale, Verfall und Konsolidierung können Relevanz verbessern; sie dürfen aber keine Wahrheits- oder Autorisierungsentscheidung treffen. Zunächst deterministische, konfigurierbare Regeln, Content-Hash-Dedupe und optionale lokale Embeddings. Keine zwingenden LLM-Aufrufe zum Speichern oder Abrufen. Automatische Promotion nur für eng definierte, belegte Fälle; Agenten-Ausgaben sind standardmäßig Vorschläge. Alte Episoden bleiben über Provenienz/Archiv oder Tombstones nachvollziehbar und werden nicht unbemerkt überschrieben.
+Shodh-inspirierte Zugriffsstärke, Vergessen/Decay und Konsolidierung dienen nur dem Ranking und der Wartung – niemals Wahrheitsprüfung oder Scope-Autorisierung. Deterministische Regeln zuerst. Kein LLM-Aufruf ist für grundlegendes Speichern oder Abrufen erforderlich. Promotion aus Episoden in geprüfte Fakten bleibt Review-/Policy-gesteuert. Originalbelege bleiben archiviert/verknüpft.
 
-Uteke-inspirierte Rooms, Autorzuordnung, Quellenzitate, point-in-time-Abfragen und explizite `contradicts`/`supersedes`-Kanten verbessern Teamarbeit und Debugging. Optimistisches `expected_version`-Update verhindert verlorene parallele Änderungen. Falsche oder abgelehnte Werte können als Tombstone gespeichert werden, damit derselbe Inhalt nicht durch Import oder Auto-Capture wiederkehrt.
+Uteke-inspirierte Rooms, Zeitabfragen, Quellenzitate, typed relations, Widerspruchs- und Supersession-Kanten sowie tombstones für explizit zurückgewiesene Werte machen Memory nachvollziehbar und konfliktfest.
 
-### 5.3 Retrieval und Sicherheit
+### 8.3 Recall und Sicherheit
 
-Erste Ausbaustufe: SQLite-FTS/strukturierte Filter, Tags, Zeit-/Roomfilter und Beziehungsgraph; Ergebnisse deterministisch fusionieren. Optionaler lokaler Embedding-/Vektorindex kommt hinter `MemoryEmbedder`/`MemoryIndex`-Traits hinzu und kann deaktiviert bleiben. Reranking nur nach Messung von Qualität, Latenz und Ressourcen. Suchergebnisse enthalten knappe Vorschau plus ID/Quelle; vollständiger Text wird gezielt nachgeladen.
+Erste Version: strukturierte SQLite-Filter + FTS, Tags/Entities, Zeit-/Roomfilter und relationale Links; deterministisches Ranking/RRF. Lokale Embeddings/ANN und Cross-Encoder bleiben optionale, austauschbare Traits, bis Qualität, Modellgröße, Offlineverhalten und Latenz gemessen sind.
 
-Secrets vor Persistenz und Embedding redigieren oder im Strict-Modus den Write ablehnen. Memory und Code-Snippets sind untrusted data: im Prompt klar als Daten einfassen, niemals als System-/Tool-Anweisung behandeln. Privacy-/Retention-Einstellungen und „forget“ müssen auch abgeleitete Indizes und Cache-Einträge abdecken.
+Secrets vor Persistenz und Embedding redigieren; optional strikter Modus lehnt sensible Writes ab. Recalled Memory/Code ist untrusted data und wird im Prompt als Dateninhalt gekennzeichnet. „Forget“ entfernt auch abgeleitete Index-/Cache-Inhalte, mit nachvollziehbarem Tombstone, wenn nötig.
 
-### 5.4 Capture statt blindem Auto-Memory
+### 8.4 Capture statt blindem Auto-Save
 
-Task-Ende kann eine strukturierte Episoden-Zusammenfassung vorschlagen: Ziel, geänderte Artefakte, tatsächlich ausgeführte Tests, beobachtete Fehler, Ergebnis und offene Punkte; jeweils mit Events/Dateien als Beleg. Entscheidungen/Fakten erhalten Status `proposed` bis Review oder passende Policy greift. Kein automatisches Speichern vollständiger Prompts, Antworten oder NDJSON-Logs.
+Beim Taskabschluss kann ein Review-fähiger Episodenvorschlag entstehen: Ziel, Änderungen/Artefakte, tatsächlich ausgeführte Tests und deren Ergebnis, beobachtete Fehler, Lösung und offene Fragen. Jeder Claim braucht Event-/Datei-/Tool-Quelle. Keine vollständigen Prompts oder Session-Logs ungeprüft als Memory speichern.
 
-## 6. Projektübergreifender Code-Index nach srag-Ideen
+## 9. Projektübergreifender Code-Index: srag-Ideen
 
-Ein optionaler, lokal verwalteter Index hilft Agenten, bereits vorhandene Implementierungen und Konventionen wiederzuverwenden. Der erste native Pfad kann Rust-seitig Dateien entdecken, stabile Hashes speichern, in AST-bewusste Chunks teilen (Tree-sitter wo zuverlässig, ansonsten markierter Fallback), und inkrementell nur geänderte Dateien indexieren. Projekt-Allowlist und Ignore-Regeln schließen `.git`, Build-Artefakte, generierte Dateien und Secrets standardmäßig aus.
+Lokaler optionaler Index mit Allowlist pro Projekt, `.gitignore`-/Build-/generated-Ausschlüssen, Secret-Scrub vor Persistenz und inkrementeller Hash-Synchronisierung.
 
-Suchoberfläche in Stufen:
+1. Exakte Suche und SQLite FTS als robuste Basis.
+2. Symbol-/AST-aware Chunks mit Tree-sitter, Zeilenbereichen und markiertem Fallback.
+3. Cross-project Pattern-/Convention-Suche mit expliziter Projekt-Allowlist.
+4. Optional lokaler Vector Search und Reciprocal Rank Fusion.
+5. Caller/Callee- und Call-Graph-Kontext nur für Sprachen/Parser mit validierter Genauigkeit.
 
-1. exakte Symbol-/Textsuche und SQLite FTS;
-2. Projekt- und Sprachfilter sowie Pattern-/Konventionszusammenfassung;
-3. optional lokales semantisches Retrieval mit Vektorindex und Reciprocal Rank Fusion;
-4. optionales Reranking und Call-Graph-Information nur, wenn Sprachunterstützung belastbar ist.
+Treffer liefern Projekt, Pfad, Zeilen, Symbol, Index-/Commit-Version und Relevanzgrund. Standardmäßig gibt es kleine Snippets; Inhalte können gezielt mit Datei-/Zeilenrange nachgeladen werden. Keine Projektübergreifende Suche außerhalb der autorisierten Allowlist.
 
-Ergebnis enthält Projekt, Pfad, Symbol, Zeilenbereich, Commit-/Indexversion und Relevanzgrund. Standardmäßig werden kleine Ausschnitte statt ganzer Dateien in den Prompt gegeben; Agenten können bei Bedarf die Datei oder einen Bereich gezielt anfordern. Indexierung ist inkrementell und interruptible, mit `status`, `sync`, `watch` als mögliche spätere CLI-UX. Cross-project retrieval setzt ausdrückliche Projektberechtigung voraus. Kein Code verlässt die Maschine für Embeddings, außer Betreiber konfiguriert dies ausdrücklich.
+## 10. Wiederherstellbare Tool-Output-Kompression: TinyJuice-Ideen
 
-## 7. Recoverable Context-Kompression nach TinyJuice-Ideen
+Content-aware Policies für Logs, Tests, Diffs, JSON, Search und HTML; pro Agent/Tool/Task `off`, `light`, `full`. Deterministische Reducer behalten Fehler, Warnungen, Stacktraces, geänderte Zeilen, Signaturen, relevante Treffer und Anomalien. Exakte Datei-Lesevorgänge bleiben standardmäßig unberührt.
 
-Tool-Ausgaben (Tests, Logs, JSON, Diff, Suche, HTML) sind ein wesentlicher Context-Kostentreiber. Statt einer pauschalen Kürzung führt bkgcrewcli eine optionale, content-aware Policy-Schicht ein:
+Verlustbehaftete Ausgabe muss Auslassungen offen markieren. Original wird in task-/scopegebundenem Artefakt-Store mit TTL, Size Cap, Auth und Löschpfad hinterlegt und per Recovery-Tool selektiv abrufbar. Wenn Original nicht sicher gespeichert werden kann, verlustbehaftete Kompression ablehnen bzw. klaren Größenfehler melden; niemals still abschneiden. Keine automatische LLM-Zusammenfassung im ingest-Pfad der ersten Version.
 
-- `off`, `light`, `full` je Agent/Tool/Task; sichere Defaults und sichtbare Gründe.
-- Deterministische Reduktion für redundante Logs, strukturierte Suchtreffer, große JSON-Listen und Diffs. Fehler, Warnungen, Stacktraces, relevante Treffer, Signaturen und geänderte Zeilen bleiben priorisiert.
-- Exakte Datei-Lesevorgänge standardmäßig unverändert. Kompression darf nicht stillschweigend Ergebnisse als vollständig ausgeben.
-- Jede verlustbehaftete Ausgabe nennt klar, was ausgelassen wurde und stellt – sofern Original sicher gespeichert werden kann – einen kurzlebigen Recovery-Verweis bereit. Der Agent kann Details gezielt nachladen.
-- Ist Recovery nicht verfügbar oder scheitert Speicherung, wird verlustbehaftete Kompression abgelehnt und Original bzw. ausdrücklich deklarierter Größenfehler weitergegeben. Keine falsche Verlustfreiheitsgarantie.
-- Cache autorisiert pro Projekt/Task/Agent, hat Größen-/TTL-Limits, Verschlüsselungs-/Dateirechte-Policy und Löschpfad. IDs sind nicht erratbar; Token enthält keine Inhalte.
-- Keine LLM-Zusammenfassung im ingest-Pfad der ersten Version. Spätere on-demand-Zusammenfassung braucht Modellbudget, Taskkontext, Quelle und gesicherte Original-Recovery.
+TinyJuice- und srag-README kennzeichnen GPLv3/GPL-3.0. Der Zielrepo ist laut README MIT-lizenziert. Es wird weder Code kopiert noch eine direkte Runtime-Abhängigkeit eingezogen; wir implementieren unabhängige Spezifikationen und lassen Lizenz-/Dependency-Policy vor Release prüfen.
 
-`TinyJuice` selbst ist laut Referenz-README GPL-3.0. Daher keine direkte Abhängigkeit oder Codeübernahme in die MIT-lizenzierte Zielcrate ohne explizite Lizenz-/Rechtsprüfung. Zunächst wird die gewünschte Verhaltensspezifikation unabhängig umgesetzt und getestet.
+## 11. Context Orchestrator
 
-## 8. Task Context Builder: Integration der vier Wissensquellen
+Ein einziger deterministischer Builder kombiniert Task, Memory, Code-Suche, Artefaktverweise und Adapterwissen unter hartem Tokenbudget. Es ist kein weiterer Speicher.
 
-Der Context Builder wird zentraler, deterministischer Komponist, nicht ein neuer Speicher. Eingaben: Task-Anweisung, erlaubte Projekt-/Room-Scopes, Agentenrolle, aktueller Git-Stand, relevante Workflow-Abhängigkeiten und token budget. Er ruft Code-Index und Memory getrennt ab und integriert komprimierte Tool-Artefakte nur anhand stabiler Referenzen.
+Prioritäten:
 
-Prioritätsreihenfolge:
+1. System-/Safety-Policy und unveränderte aktuelle Taskanweisung.
+2. Agent-Rolle/Tools, soweit nicht native Agentenconfig.
+3. Gepinnte, gültige Projekt-Constraints und geprüfte Entscheidungen.
+4. Wenige Code-Symbole/Snippets mit zitierbarer Quelle.
+5. Relevante Episoden, Fehler, Reparaturen und Prozeduren mit Provenienz/Alter.
+6. Dependency-Summaries, Recovery- und Artefakt-IDs.
 
-1. feste System-/Sicherheitsregeln und aktuelle Task-Anweisung;
-2. Agentenrolle/Tool-Definitionen, soweit dieser Adapter sie nicht ohnehin selbst verwaltet;
-3. gepinnte, gültige Projekt-Constraints und geprüfte Entscheidungen;
-4. wenige passende Code-Symbole/-Ausschnitte mit Pfad und Zeilenangabe;
-5. passende Episoden/Fehler/Prozeduren samt Autor, Zeit und Quelle;
-6. Dependency-Zusammenfassung und Recovery-/Artefaktverweise.
+Je Block Tokenkosten schätzen, Duplikate reduzieren, Widersprüche markieren, Max-Einträge durchsetzen und verarbeitete Quellen referenzieren. Getrennte Context-Buckets (system, tools, memory, code, conversation) ermöglichen Diagnose. Provider-gemeldete Usage übersteuert lokale Schätzung. Kein Versprechen, dass Prefix-Stabilität Upstream-Cache oder Kostensenkung bewirkt.
 
-Pro Eintrag Tokenkosten schätzen, hartes Gesamtbudget einhalten, Duplikate entfernen und Widersprüche sichtbar nebeneinander darstellen. Memory- und Code-Index-Version sowie verwendete Retrieval-IDs in Diagnose speichern, Inhalte aber nicht routinemäßig loggen. Kontextbudget hat getrennte Buckets für Systemprompt, Tools, Memory, Code und Conversation. Tatsächliche Provider-Usage ersetzt Näherungswerte, sobald verfügbar. Kontextkompression ist keine Garantie für Provider-KV-Cache oder geringere Abrechnung; diese Effekte getrennt messen.
+## 12. WebUI, CLI und Betrieb
 
-## 9. CLI und Observability: pragmatische prmt-Inspiration
+Vorhandene WebUI und Diagnoseflächen nutzen, statt einen zweiten Admin-Client einzuführen. Ergänzungen in sinnvoller Reihenfolge: Pool-/Lane-Status, Queue/Modell-Capacity, Provider-Protokollmatrix, Agent-Capabilities, Usage/Quota, Memory-/Index-Health, Retrieval-/Recovery-Metadaten und Doctor.
 
-`prmt` ist ein schneller, kontextsensitiver Shell-Prompt, kein Kernbaustein der Agentenplattform. Optional kann bkgcrewcli eine minimale Statusansicht für Projekt, Git-Branch, aktive Crew/Task, Queue-Wartezahl, Gateway-/Memory-Zustand und letzten Exit-Status bieten. Sie darf keine Versionserkennung oder Netzwerkzugriffe im interaktiven Prompt erzwingen und muss mit `--no-color`/Plain-Text funktionieren. Erst messen, bevor eine zusätzliche Prompt-Abhängigkeit eingeführt wird.
+Dashboard zeigt Trends, Health, Kapazität, Queue-/TTFT-/Latenz-Aufschlüsselung, pro-Modell/per-Lane-Auslastung und Providerusage. Metriken nutzen counts/sizes/status/strategy statt Prompt-, Memory- oder Codeinhalt. „Measured“, „estimated“ und „unavailable“ werden unterschieden. Retention ist konfigurierbar.
 
-Die vorhandene WebUI/Diagnose sollte stattdessen zuerst verständliche Statuskarten für Lanes, Queue, Adapter-Capabilities, Memory-/Index-Health, letzte Retrieval-IDs und Kompressionsstatistiken ergänzen. Metriken ausschließlich aggregiert/redigiert: Tokens/Bytes, Strategie, Dauer, skip-Grund, Cache-Recovery-Erfolg, Recall-/Index-Latenz. Keine Rohprompts, Memory-Texte, Snippets oder Keys als Labels.
+Prmt ist nur Inspiration für schnellen Kontextstatus (Projekt, Branch, aktiver Workflow, Queue, letzte Tests), nicht als Dependency. Keine langsame Versionsabfrage/Netzwerkzugriffe pro Shell-Prompt; Plain-Text und no-color sind Pflicht.
 
-## 10. Datenhaltung, Restart und Betrieb
+## 13. Phasen und Abnahmekriterien
 
-SQLite/SQLx bleibt Metadaten-, Memory- und FTS-Basis, wenn Tests die Anforderungen bestätigen. Speicher für Vektoren/komprimierte Originale sind getrennt und injizierbar; kein unkontrolliertes Wachstum in der SQLite-DB. Schema-Versionen, Transaktionen, Backups, Integritätsprüfung und Wiederherstellung gehören zum MVP. Indizes werden nach Crash prüfbar und aus kanonischen Records neu aufbaubar.
+### Phase 0 — HEAD-Audit und Feature-Matrix
 
-Pool-Sendefenster überleben Prozessneustarts konservativ: Persistenz oder Drain-/Window-Wait, wenn derselbe Key-Pool wieder aktiviert wird. Kein Multi-Process-Shared-Key-Betrieb ohne atomaren Limiter und Fencing; erste Version dokumentiert/exerzisiert genau einen aktiven Pool-Eigentümer je Key-Set. Memory, Code-Index und Recovery-Cache haben unterschiedliche Retention und Löschkommandos.
+- Ziel `eyshoit-commits/bkg-crew-cli` HEAD, bestehende Gateway-/Provider-/Agent-/WebUI-/Task-Module, Crate-Lizenz und Tests auditieren.
+- Copilot-API-Tabelle für jeden Endpoint, Provider, Model discovery/mapping, tool use, streaming/transport, usage/auth ausfüllen: exists / partial / missing / intentionally excluded plus Testreferenz.
+- Pro Agent/Provider capability matrix; nur unterstützte und dokumentierte Auth- und Endpoint-Verträge.
 
-## 11. Implementierungsreihenfolge
+**Gate:** kein Upstream-Modul irrtümlich als Zielrepo-Basis vorausgesetzt; jeder gewünschte Featurebereich hat Status und Beleg.
 
-### Phase 0 — Baseline und Verträge
+### Phase 1 — Lanes + Dispatcher + Governor
 
-- Aktuellen Fork-HEAD, Gateway-Routen, Keystore, Agentenadapter, Build/CI und Lizenzinformationen prüfen.
-- Capability-Matrix pro Agent: Base-URL, Auth, API-Format, Streaming, Tools, Fallbacks.
-- Schemas für Task-/Room-/Memory-/Artifact-IDs und Datenaufbewahrung festlegen.
-- Test-Fixtures für Codeindex, Memory-Recall und komprimierbare Tool-Ausgaben einrichten.
+- ProviderPool/Lane/Reservation, exact sliding window, persistent/conservative restart state, FIFO Queue, deadlines, cancellation, per-model permits, cooldown taxonomy.
+- Alle verwalteten HTTP-/SSE-/ggf. WebSocket-Sends über dieselbe Admission API.
+- Fünf-Key enforcing mock mit 429/Retry-After, worker slots, disconnect und cancellations.
 
-**Gate:** klarer Ist-Stand und keine Annahme aus einem anderen Branch.
+**Gate:** keinerlei Rate-Verstöße im Mock, kein Permit/Reservation-Leak, keine versteckten Sends außerhalb des Pools.
 
-### Phase 1 — Memory-Grundlage (Shodh/Uteke-Kern)
+### Phase 2 — Multi-protocol Gateway-Abdeckung (Copilot-API-Inspiration)
 
-- Versionierter SQLite-Store, Scopes/Rooms, Provenienz, Hash-Dedupe, Typen, Tags, Relations, CAS und Tombstones.
-- FTS/strukturierter Recall, deterministische Ranking-Baseline, manuelle/proposed Writes.
-- Backup/Restore, Redaction, Scope-Isolation und Löschung testen.
+- Bestehende Chat/Responses/Messages contracts härten und Endpoint-Matrix vervollständigen.
+- Multi-provider routing, model mappings/discovery, tool round-trip, streaming und Usage konsistent anbinden.
+- Provider-/Modellfähigkeiten und unsupported parameters explizit ausweisen; CLI config examples und Doctor.
+- WebSocket nur nach protokollspezifischem Nutzen-/Kompatibilitätsnachweis.
 
-**Gate:** isolierte Projekte/Räume, reproduzierbarer Recall, keine verlorenen parallelen Updates.
+**Gate:** Contract tests je Feature-Matrix-Zelle; keine falsche Full-Parity-Aussage.
 
-### Phase 2 — Context Builder und Capture
+### Phase 3 — Durable Crew-/Taskkoordination
 
-- Tokenbudget, feste Prompt-Reihenfolge, Quellenangaben, Widerspruchsdarstellung und degradierter Modus.
-- Task-Abschluss erzeugt Episoden-Vorschlag aus Ergebnis/Events/Artefakten, nicht vollständigen Transkripten.
-- CLI `memory status/recall/inspect` nach Prüfung vorhandener Befehlsstruktur.
+- Task DAG, IDs, persisted status/events, bounded dependency summaries, retry/deadline/cancel und Sandbox-Bindung.
+- Idempotente Submission und restart/recovery Tests.
 
-**Gate:** Memory optional ausfallbar, erforderliche Policy explizit fail-closed.
+**Gate:** parallele/abgebrochene/restarted Workflows behalten nachvollziehbaren Zustand.
 
-### Phase 3 — Code Index (srag-Ideen)
+### Phase 4 — Memory + Context Builder
 
-- Allowlist/Ignore-/Secret-Regeln, Hash-basiertes inkrementelles Indexieren, Symbol-/AST-Chunks, SQLite FTS.
-- Projektübergreifende Suche mit Pfad-/Zeilenbelegen; später optionaler lokaler Embedder und Vektor-RRF.
-- Indexstatus, Rebuild und Löschpfad.
+- Scopes/Rooms/Provenienz/FTS, CAS, Dedupe, relations, tombstones, backup/restore und secret redaction.
+- Token-budgetierter Context und task evidence capture proposals.
 
-**Gate:** inkrementelle Aktualität und Scope-Isolation; nachvollziehbare Trefferquellen.
+**Gate:** kein cross-project leak; Memory kann ausfallen ohne unerwarteten Taskverlust; required-policy ist explizit fail-closed.
 
-### Phase 4 — Recoverable Tool-Output-Reduktion
+### Phase 5 — Code Index + Recoverable artifacts
 
-- Content-Detection, `off/light/full`, zunächst deterministische Reducer und explizite Loss-Marker.
-- Taskgebundener Original-Cache mit Recovery-Tool/API, TTL, Limits und Auth.
-- Test-/Diff-/JSON-/Log-Fixtures, exact-read bypass und Fail-safe-Passthrough.
+- Inkrementeller FTS/AST-Index und berechtigte Suche; optionale Vektoren nach Quality Gate.
+- content-aware reducers, loss markers, Task Recovery API, TTL/capacity and fail-safe passthrough.
 
-**Gate:** kein stiller Datenverlust; jeder verlustbehaftete Pfad ist wiederherstellbar oder wird abgelehnt.
+**Gate:** Treffer sind zitierbar; kein stiller Verlust; recovery round-trip und Löschung funktionieren.
 
-### Phase 5 — Semantische Qualität, Pflege und UX
+### Phase 6 — UX, adaptive policy and rollout
 
-- Optional lokale Embeddings/ANN, Hybrid-Fusion, Candidate reranking nur anhand reproduzierbarer Evaluation.
-- Memory-Decay/Konsolidierung als Vorschläge/konfigurierbare Wartung; Nutzer kann anpinnen, prüfen, zurücksetzen.
-- WebUI-/Diagnoseansichten und gemessene CLI-Statusanzeige.
+- Aggregierte WebUI-/Metrics-/Doctor-Anzeigen, opt-in flags, Canary und klare Downgradepfade.
+- Adaptive lane/concurrency policies oder hedging nur nach reproducible load tests, default off.
 
-**Gate:** kein Retrieval-Qualitätsverlust, nachvollziehbare Pflege, Privacy- und Performanceziele erfüllt.
+**Gate:** Sicherheit, Lizenz, Usage/Kostenklarheit, Performance und Rollback getestet.
 
-### Phase 6 — Provider-/Adapter-Härtung und Rollout
+## 14. Tests und Qualitätsmessung
 
-- Einheitliche Zähler für direkten und gatewayvermittelten Sendepfad, Adapter-End-to-End-Tests, Deadline/Cancel/429.
-- Fünf-Key enforcing Mock, Modell-Concurrency und begrenzte Queue-Lasttests.
-- Begrenzter Rollout mit Opt-in-Flags und Rückfall auf klar markierten Basismodus.
+- **Gateway:** Protocol contract tests, tool-call round-trip, model mapping/discovery, malformed/unsupported parameters, SSE fragmentation, WebSocket only if enabled, auth and redaction.
+- **Lanes:** strict rolling-window enforcement, FIFO fairness, sticky spill, cooldown, 429/Retry-After, model governor, restart, multiprocess fencing.
+- **Crew:** DAG edges, idempotency, process cancellation, retry policy, crash recovery, sandbox permissions.
+- **Memory:** scope isolation, CAS conflict, dedupe, time-travel, relations, tombstones, privacy filters, backup/restore.
+- **Code search:** expected top-k symbols, exact line ranges, generated/secret exclusions, incremental hash update and project allowlist.
+- **Compression:** no-loss/marked-loss behavior, original retrieval exactness, safety failures, fixture signal preservation, TTL and hard caps.
+- **Evaluation:** own reproducible datasets and receipts; report recall@k, source coverage, false scope hits, task success, tool/context tokens, recovery success, latency and storage. Do not copy reference benchmark claims as bkgcrewcli results.
+- **CI:** `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, migrations, security and license checks. No live keys or unlimited real-provider load tests.
 
-## 12. Evaluierung und Release-Gates
+## 15. Referenzen und Übernahmegrenzen
 
-- **Memory Recall:** LongMemEval-/LoCoMo-inspirierte, eigene reproduzierbare Projektfragen; Recall@k, Quellenabdeckung, Widerspruchstreffer, falsche Scope-Treffer. Keine Benchmarks oder Zahlen aus Referenzprojekten als eigene Leistung ausgeben.
-- **Code Search:** bekannte Symbole/Patterns über mehrere Testrepos, top-k Trefferqualität, Zeilenkorrektheit, inkrementelle Indexzeit und Speicherverbrauch.
-- **Compression:** Tool-spezifische Fixtures mit Fakten-/Fehler-/Diff-Signalprüfungen, Ausgabegröße, Laufzeit, vollständiger Original-Roundtrip und sicherem Skip-Verhalten.
-- **Context:** identische Tasks mit/ohne Retrieval; Input-Tokens, Latenz, Task-Erfolg und Regressionen getrennt berichten.
-- **Gateway:** per-Lane RPM, 429/Retry-After, Queue-Wait, In-Flight, Cancellation, TTFT und Gesamtzeit.
-- CI: `cargo fmt --all -- --check`, Workspace-Tests, Clippy mit `-D warnings`, Migration-/Recovery-/Security-Tests. Keine Live-Keys oder unbeschränkten Provider-Requests.
+Alle sind Verhaltens-/Designreferenzen. Keine Quellcodeübernahme:
 
-## 13. Referenzen, Lizenz und Übernahmegrenzen
+- [bkg-zig/nim-proxy](https://github.com/bkg-zig/nim-proxy) — MIT laut README; Sliding-Window-Lanes, FIFO dispatcher, affinity/spillover, Retry-After, Modell-Concurrency, SSE heartbeats, deadlines, usage and operational dashboards. **Primäre Vorlage für Provider Admission**, unabhängig in bkgcrewcli implementieren.
+- [caozhiyuan/copilot-api](https://github.com/caozhiyuan/copilot-api) — MIT laut Repository-Metadaten; Universal Gateway, Chat/Responses/Messages, provider/model routing, agent configuration, SSE/WebSocket, discovery/mappings, tools, usage and desktop UX. **Vorlage für die zu testende Multi-protocol Feature-Matrix**, kein Claim vollständiger Parität.
+- [varun29ankuS/shodh-memory](https://github.com/varun29ankuS/shodh-memory) — Apache-2.0 laut README; local-first memory tiers, offline/no-LLM recall, dedup, usage signals and consolidation.
+- [codecoradev/uteke](https://github.com/codecoradev/uteke) — Apache-2.0 laut README; Rooms, author/source, hybrid retrieval, relations, time-aware recall, privacy and reproducible evaluation.
+- [wrxck/srag](https://github.com/wrxck/srag) — GPL-3.0 laut README; incremental AST-aware cross-project indexing, hybrid semantic/full-text search, patterns, caller/callee and secret filtering. Concept-only; independently implement.
+- [tinyhumansai/tinyjuice](https://github.com/tinyhumansai/tinyjuice) — GPLv3 laut README; profile-aware content reducers and recoverable lossy outputs. Concept-only; independently implement.
+- [leeguooooo/agent-cli-to-api](https://github.com/leeguooooo/agent-cli-to-api) — protocol facade and multiple CLI backend adapter patterns; confirm exact license and provider-supported auth before any future dependency/copy (not planned).
+- [3axap4eHko/prmt](https://github.com/3axap4eHko/prmt) — MIT laut README; fast, context-aware terminal presentation only.
 
-Dies sind Designreferenzen, keine behauptete Kooperation oder gemeinsame Runtime:
+Vor jedem Release werden Ziel-Lizenz, alle direkten/transitiven Dependencies und SBOM erneut geprüft. Besonders GPL-3.0-Referenzen bleiben konzeptionell, weil der Ziel-README MIT nennt. Auch MIT/Apache-Repos werden nicht kopiert: dies hält Ownership, Architektur und Lizenzlage klar.
 
-- [Shodh-Memory](https://github.com/varun29ankuS/shodh-memory) — Apache-2.0 laut README; lokale Memory-Tiers, LLM-freies Store/Recall, Dedup, Zugriffssignale, Konsolidierung und lokale semantische Suche. **Hauptinspiration für Lifecycle/Pflege**, nicht ungeprüftes Übernehmen neurobiologischer Heuristiken.
-- [Uteke](https://github.com/codecoradev/uteke) — Apache-2.0 laut README; Rooms, Autor-/Quellenangaben, FTS+Vektor-Fusion, Beziehungen, Zeitreisen, Privacy und nachvollziehbare Benchmarks.
-- [srag](https://github.com/wrxck/srag) — GPL-3.0 laut README; AST-Codechunks, inkrementelles Multi-Projekt-Indexing, Hybrid Search/Reranking, Pattern- und Call-Graph-Tools, Secret-Redaction. GPL-3.0-Kompatibilität mit der MIT-Zielcrate vor jeder Code-/Link-Übernahme rechtlich prüfen; bevorzugt unabhängig spezifizieren.
-- [TinyJuice](https://github.com/tinyhumansai/tinyjuice) — GPLv3 laut README; profilgesteuerte, inhaltsbewusste Tool-Output-Reduktion und explizite Original-Recovery. Keine direkte Abhängigkeit/Codekopie ohne Lizenzprüfung.
-- [agent-cli-to-api](https://github.com/leeguooooo/agent-cli-to-api) — heterogene CLI-Backends hinter kompatiblen API-Endpunkten, Modellrouting und Streaming als Adapter-Ideen. Lizenz und konkrete Auth-/Backend-Verträge vor Übernahme prüfen.
-- [prmt](https://github.com/3axap4eHko/prmt) — MIT laut README; schneller, kontextsensitiver Shell-Prompt, nur optionale Terminal-UX-Inspiration.
+## 16. Definition of Done
 
-Zunächst werden nur Konzepte und beobachtbare Verträge übernommen. Für jede tatsächliche Code- oder Dependency-Übernahme sind exakte Revision, Lizenzdatei, Copyright/NOTICE, Transitivabhängigkeiten und Kompatibilität mit der Zielcrate zu prüfen.
-
-## 14. Hauptrisiken und Gegenmaßnahmen
-
-| Risiko | Gegenmaßnahme |
-|---|---|
-| Agent umgeht Pool oder nutzt unerwartete Credentials | Capability-Tests, fail-closed bzw. sichtbarer ungepoolter Modus, Secret-Redaction |
-| Projektwissen überschreitet Scope | Autorisierung vor Retrieval, explizite Rooms/Allowlist, Isolationstests |
-| falsches Memory oder Prompt Injection | Provenienz, Vorschlagsstatus, Tombstones, Widerspruchsbeziehungen, untrusted-data framing |
-| Code-Index leakt Secrets oder Fremdprojektcode | lokale Verarbeitung, Ignore-/Secret-Filter, Scopeprüfung, minimale Snippets |
-| Kompression lässt wichtige Fakten verschwinden | markierte Auslassungen, Recovery-Cache, exact-read bypass, golden fixtures |
-| Embedding/Reranker erhöht Komplexität oder Latenz | optionale Trait-Grenze; FTS/structured baseline zuerst |
-| dynamischer Decay löscht wertvolles Wissen | keine Hard-Delete-Promotion automatisch; Pins, Audit, Backup und Review |
-| Referenzlizenzen kollidieren | keine ungeprüfte GPL-Codeübernahme; Lizenzgate vor Dependency/Copy |
-| Kontext-/KV-Cache-Effekt wird überschätzt | Tokenreduktion, Provider-Cache-Usage und Qualität separat messen |
-
-## 15. Definition of Done
-
-- Provider-Gateway und kompatible Agenten nutzen nachweislich einen gemeinsamen Lane-/Admission-Pfad; inkompatible Agenten werden sichtbar gekennzeichnet.
-- Memory ist lokal-first, versioniert, scoped, mit Herkunft versehen, redigiert, export-/backupfähig und sicher löschbar.
-- Memory-Retrieval ist im Kern ohne LLM-Aufruf nutzbar; semantische Modelle sind optional und offlinefähig, sofern aktiviert.
-- Code-Retrieval liefert überprüfbare Projekt-/Pfad-/Zeilenquellen und darf keine nicht freigegebenen Projekte durchsuchen.
-- Tool-Output-Kompression ist transparent; verlustbehaftete Inhalte sind wiederherstellbar oder Kompression wird abgelehnt.
-- Context Builder hält ein hartes Budget ein und protokolliert nur redigierte Retrieval-/Nutzungsmetadaten.
-- Tests belegen Isolation, Cancellation, Restart, Recovery, Scope, Migration und Lizenz-/Secret-Redaction.
-- Bestehende CLI-, Config-, Event-, Gateway- und Einzelkey-Verträge bleiben rückwärtskompatibel oder erhalten eine dokumentierte Migration.
+- Provider-Lanes/Queue/Model-Governor decken sämtliche verwalteten Provider-Sends ab und bestehen enforcing Rate-/Concurrency-Tests.
+- Copilot-API-Feature-Matrix ist ehrlich ausgefüllt: jede Zelle getestet oder als partial/intentionally excluded begründet; keine unbelegte Aussage „alles absorbiert“.
+- Agenten-Kompatibilität und unverwaltete Fallbacks sind sichtbar und überprüfbar.
+- Crew-Tasks sind durable, bounded, cancellable und sandbox-/permission-aware.
+- Memory ist lokal-first, scoped, nachvollziehbar, redigiert, export-/backupfähig und sicher löschbar.
+- Codeindex liefert belegte Treffer nur für autorisierte Projekte.
+- Verluste durch Kompression sind sichtbar und wiederherstellbar oder Kompression findet nicht statt.
+- Context Builder hat ein hartes Budget; Metriken speichern keine Inhalte.
+- Keine Referenz-Quellcodes oder unfreigegebenen Runtime-Abhängigkeiten; Lizenz-, Security-, CI- und Rollback-Gates bestehen.
